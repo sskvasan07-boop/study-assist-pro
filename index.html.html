@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StudyPilot: AI exam prep tutor</title>
+<style>
+:root{--bg:#eef2f8;--card:#fff;--tx:#17203a;--mut:#5d6882;--pri:#2b4acb;--ok:#15803d;--mid:#b45309;--bad:#c62828;--bd:#d5dce9;--grid:#dde4f0;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1526;--card:#172038;--tx:#e6eaf7;--mut:#9aa6c4;--pri:#8fa5ff;--ok:#4ade80;--mid:#fbbf24;--bad:#f87171;--bd:#2a3556;--grid:#16203a}}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--tx);background:var(--bg) linear-gradient(var(--grid) 1px,transparent 1px) 0 0/28px 28px,linear-gradient(90deg,var(--grid) 1px,transparent 1px) 0 0/28px 28px}
+h2,h3{font-family:"Iowan Old Style","Palatino Linotype",Georgia,serif;margin:.2em 0 .5em}
+header{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:10px 16px;background:var(--card);border-bottom:2px solid var(--pri);position:sticky;top:0;z-index:5}
+header b{font:700 20px Georgia,serif;margin-right:auto}
+#cd{font-weight:600;color:var(--pri)}
+nav{display:flex;flex-wrap:wrap;gap:6px;width:100%}
+main{max-width:980px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:14px}
+button,input,select{font:inherit;color:inherit}
+button{border:1px solid var(--bd);background:var(--card);padding:7px 12px;border-radius:8px;cursor:pointer}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--pri);outline-offset:1px}
+button.p,nav button.on{background:var(--pri);border-color:var(--pri);color:#fff}
+@media(prefers-color-scheme:dark){button.p,nav button.on{color:#0f1526}}
+input,select{padding:8px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);width:100%}
+label{display:block;font-size:13px;color:var(--mut);margin:8px 0 3px}
+.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+.mut{color:var(--mut)}
+.opt{display:block;width:100%;text-align:left;margin:6px 0}
+.opt.ok{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 18%,var(--card))}
+.opt.bad{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 18%,var(--card))}
+.bar{height:10px;background:var(--bd);border-radius:6px;overflow:hidden;min-width:80px}.bar i{display:block;height:100%}
+table{width:100%;border-collapse:collapse}td,th{padding:6px 8px;border-bottom:1px solid var(--bd);text-align:left}
+.w{overflow-x:auto}
+#err{color:var(--bad);font-weight:600;margin:0 0 10px}
+.day{border-left:3px solid var(--bd);padding:4px 10px;margin:6px 0}.day.now{border-color:var(--pri);background:color-mix(in srgb,var(--pri) 8%,transparent)}
+.tag{display:inline-block;padding:2px 9px;border-radius:99px;font-size:13px;margin:2px}
+ul.tree{margin:4px 0;padding-left:20px}
+.me{font-weight:700;color:var(--pri)}
+</style>
+</head>
+<body>
+<header><b>StudyPilot</b><span id="cd"></span>
+<nav>
+<button data-v="home">Setup</button><button data-v="map">Concept map</button><button data-v="plan">Study plan</button>
+<button data-v="study">Study</button><button data-v="progress">Progress</button><button data-v="teacher">Teacher dashboard</button>
+</nav></header>
+<main><p id="err"></p><div id="app"></div></main>
+<script>
+const $=(s,e=document)=>e.querySelector(s),
+esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let DB;try{DB=JSON.parse(localStorage.getItem("sp"))}catch{}
+DB=DB||{key:"",model:"gemini-3.8-flash",st:{},sub:{},me:""};
+if(DB.model==="gemini-2.5-flash")DB.model="gemini-3.8-flash";
+const save=()=>{try{localStorage.setItem("sp",JSON.stringify(DB))}catch{}};
+const S=()=>DB.st[DB.me],day=864e5,
+col=p=>p<.4?"var(--bad)":p<.7?"var(--mid)":"var(--ok)",
+avg=a=>a.length?a.reduce((x,y)=>x+y,0)/a.length:0,
+pc=p=>Math.round(p*100)+"%",
+cc=(s,id)=>s.cs.find(c=>c.id==id),
+bar=p=>`<div class="bar"><i style="width:${p*100}%;background:${col(p)}"></i></div>`,
+need=(s,c)=>(1-s.m[c.id].p)+Math.min((Date.now()-(s.m[c.id].t||s.start))/day,7)*.05+c.diff*.05,
+behind=s=>{const t=Math.floor((Date.now()-s.start)/day);return new Set(s.plan.slice(0,t+1).flatMap(d=>d.items).filter(id=>s.m[id]&&s.m[id].p<.6)).size},
+nodata=()=>$("#app").innerHTML='<div class="card">Complete Setup and the diagnostic test first.</div>';
+let view="home",cur="",tk="";
+
+/* ---------- Gemini ---------- */
+async function gem(prompt,retry=true){
+  if(!DB.key)throw new Error("Add your Gemini API key in Setup first.");
+  const B="https://generativelanguage.googleapis.com/v1beta/",H={"Content-Type":"application/json","x-goog-api-key":DB.key};
+  const r=await fetch(`${B}models/${encodeURIComponent(DB.model)}:generateContent`,{method:"POST",headers:H,
+    body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json"}})});
+  const j=await r.json();
+  if(!r.ok){
+    const msg=j.error?.message||"Gemini error "+r.status;
+    if(retry&&(r.status==404||/no longer available|not found|not supported/i.test(msg))){
+      /* the chosen model was retired: switch to the newest Flash model this key can use */
+      let best;try{const l=await(await fetch(B+"models?pageSize=200",{headers:H})).json();
+        best=(l.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes("generateContent")&&/^models\/gemini-[\d.]+-flash$/.test(m.name))
+          .map(m=>m.name.slice(7)).sort((a,b)=>b.localeCompare(a,undefined,{numeric:true}))[0]}catch{}
+      if(best&&best!==DB.model){DB.model=best;save();return gem(prompt,false)}
+    }
+    throw new Error(msg);
+  }
+  return JSON.parse(j.candidates[0].content.parts.map(p=>p.text||"").join("").replace(/```json|```/g,""));
+}
+const clean=qs=>(qs||[]).filter(q=>q&&q.q&&Array.isArray(q.o)&&q.o.length>1&&q.o[+q.a]!==undefined)
+  .map(q=>({c:q.c,q:String(q.q),o:q.o.map(String),a:+q.a,e:String(q.e||"")}));
+async function task(msg,fn,back){
+  $("#err").textContent="";$("#app").innerHTML=`<div class="card">${msg}…</div>`;
+  try{await fn()}catch(e){$("#err").textContent=e.message;go(back)}
+}
+
+/* ---------- learner model ---------- */
+function upd(id,g){
+  const s=S(),m=s.m[id]||(s.m[id]={p:.5,n:0});
+  m.p+=((g?1:0)-m.p)*.3;m.n++;m.t=Date.now();
+  s.log.push({t:Date.now(),c:id,ok:g?1:0,d:cc(s,id)?.diff||2});if(g)s.xp+=10;save();
+}
+function mkPlan(s){
+  const D=Math.max(1,Math.ceil((new Date(s.date+"T23:59:59")-Date.now())/day)),
+  rev=D>3?Math.max(1,Math.round(D*.2)):0,N=D-rev,
+  sc=c=>(1-s.m[c.id].p)*(1+c.diff*.5)+.1,done=new Set(),ord=[];
+  const put=c=>{if(done.has(c.id))return;done.add(c.id);
+    c.pre.map(i=>cc(s,i)).filter(x=>x&&s.m[x.id].p<.6).forEach(put);ord.push(c)};
+  [...s.cs].sort((a,b)=>sc(b)-sc(a)).forEach(put);
+  const tot=ord.reduce((a,c)=>a+sc(c),0),days=Array.from({length:D},(_,i)=>({d:i+1,items:[],rev:i>=N}));
+  let acc=0;
+  ord.forEach(c=>{const st=Math.floor(acc/tot*N);acc+=sc(c);
+    const en=Math.max(st,Math.ceil(acc/tot*N)-1);
+    for(let d=st;d<=Math.min(en,N-1);d++)days[d].items.push(c.id)});
+  return days;
+}
+
+async function aiPlan(s){
+  const D=Math.max(1,Math.ceil((new Date(s.date+"T23:59:59")-Date.now())/day)),R=D>3?Math.max(1,Math.round(D*.2)):0;
+  s.note="";
+  if(D>60)return mkPlan(s);
+  try{
+    const j=await gem(`You are an exam-prep planner for "${s.subject}". The exam is in ${D} days. Topics (id, name, prerequisite ids, difficulty 1 to 3, current mastery percent): ${JSON.stringify(s.cs.map(c=>({id:c.id,name:c.name,pre:c.pre,diff:c.diff,mastery:Math.round(s.m[c.id].p*100)})))}. Return JSON {"strategy":"2 to 3 sentence overview","days":[{"d":1,"items":["topic ids"],"task":"what to do that day in 1 to 2 sentences","min":90,"rev":false}]} with exactly ${D} day entries. Rules: schedule weak and difficult topics earlier and give them more days, teach prerequisites before the topics that depend on them, reserve the final ${R} days for revision and mock quizzes (rev true, items are the weakest topics), and make every topic appear at least once outside revision days.`);
+    const days=(j.days||[]).slice(0,D).map((x,i)=>({d:i+1,items:[...new Set((x.items||[]).map(String).filter(id=>cc(s,id)))],task:String(x.task||""),min:Math.round(+x.min)||0,rev:!!x.rev}));
+    if(days.length<D||!days.some(x=>x.items.length))throw new Error("incomplete plan");
+    const seen=new Set(days.flatMap(x=>x.items));
+    s.cs.filter(c=>!seen.has(c.id)).forEach(c=>{(days.filter(x=>!x.rev).sort((a,b)=>a.items.length-b.items.length)[0]||days[0]).items.push(c.id)});
+    s.note=String(j.strategy||"");
+    return days;
+  }catch(e){
+    $("#err").textContent="Gemini could not finish the plan ("+e.message+"), so the built-in planner was used.";
+    return mkPlan(s);
+  }
+}
+
+/* ---------- quiz runner ---------- */
+function runQuiz(el,qs,onAns,onDone){
+  let i=0,n=0;
+  const show=()=>{const q=qs[i];
+    el.innerHTML=`<p class="mut">Question ${i+1} of ${qs.length}</p><h3>${esc(q.q)}</h3>`+
+      q.o.map((o,k)=>`<button class="opt" data-k="${k}">${esc(o)}</button>`).join("")+`<div id="fb"></div>`;
+    el.querySelectorAll(".opt").forEach(b=>b.onclick=()=>{
+      const g=+b.dataset.k===q.a;n+=g?1:0;onAns(q,g);
+      el.querySelectorAll(".opt").forEach(x=>{x.disabled=true;if(+x.dataset.k===q.a)x.classList.add("ok")});
+      if(!g)b.classList.add("bad");
+      $("#fb",el).innerHTML=`<p>${g?"Correct.":"Not quite."} ${esc(q.e)}</p><button class="p" id="nx">${i+1<qs.length?"Next question":"Finish"}</button>`;
+      $("#nx",el).onclick=()=>++i<qs.length?show():onDone(n,qs.length)});
+  };show();
+}
+
+/* ---------- views ---------- */
+function home(){
+  const s=S()||{};
+  $("#app").innerHTML=`<div class="card"><h2>Set up your exam prep</h2><div class="g">
+  <div><label>Your name</label><input id="nm" value="${esc(DB.me)}"></div>
+  <div><label>Class and subject</label><input id="sj" placeholder="10th Physics" value="${esc(s.subject)}"></div>
+  <div><label>Exam date</label><input id="dt" type="date" value="${esc(s.date)}"></div>
+  <div><label>Gemini API key</label><input id="ky" type="password" value="${esc(DB.key)}"></div>
+  <div><label>Gemini model</label><input id="md" value="${esc(DB.model)}"></div></div>
+  <p><button class="p" id="go">${s.cs?.length?"Update exam date and rebuild plan":"Start diagnostic test"}</button></p></div>`;
+  $("#go").onclick=()=>{
+    const nm=$("#nm").value.trim(),sj=$("#sj").value.trim(),dt=$("#dt").value;
+    if(!nm||!sj||!dt)return $("#err").textContent="Enter your name, subject and exam date.";
+    DB.key=$("#ky").value.trim();DB.model=$("#md").value.trim()||"gemini-3.8-flash";DB.me=nm;
+    const k=sj.toLowerCase(),old=DB.st[nm];
+    DB.st[nm]=old&&old.k===k?{...old,date:dt}:{k,subject:sj,date:dt,start:Date.now(),cs:[],m:{},log:[],xp:0,cache:{}};
+    save();const s=S();
+    if(s.cs.length)return task("Gemini is rebuilding your plan for the new date",async()=>{s.plan=await aiPlan(s);s.start=Date.now();save();go("plan")},"home");
+    task("Gemini is building your diagnostic test and concept graph",async()=>{
+      if(!DB.sub[k]){
+        const j=await gem(`Subject: ${sj}. Return JSON {"concepts":[{"id":"c1","name":"short topic name","pre":["ids of prerequisite concepts"],"diff":2}],"questions":[{"c":"concept id","q":"question","o":["4 options"],"a":0,"e":"one-line explanation"}]}. Give 10 concepts covering the whole syllabus with acyclic prerequisites, diff is 1 to 3, and exactly one multiple-choice question per concept (a is the zero-based index of the correct option).`);
+        const cs=(j.concepts||[]).map(c=>({id:String(c.id),name:String(c.name),pre:(c.pre||[]).map(String),diff:Math.min(3,Math.max(1,+c.diff||2))}));
+        const qs=clean(j.questions).filter(q=>cs.some(c=>c.id==q.c));
+        if(cs.length<3||qs.length<3)throw new Error("Gemini returned an incomplete syllabus. Try again.");
+        DB.sub[k]={cs,qs};save();
+      }
+      go("diag");
+    },"home");
+  };
+}
+function diag(){
+  const s=S(),qs=DB.sub[s.k].qs,res={};
+  $("#app").innerHTML=`<div class="card"><h2>Diagnostic test: ${esc(s.subject)}</h2><div id="qz"></div></div>`;
+  runQuiz($("#qz"),qs,(q,g)=>res[q.c]=g,n=>{
+    s.cs=DB.sub[s.k].cs;
+    s.cs.forEach(c=>s.m[c.id]={p:c.id in res?(res[c.id]?0.75:0.2):n/qs.length*.6,n:c.id in res?1:0,t:Date.now()});
+    s.start=Date.now();save();
+    task("Gemini is building your study plan",async()=>{s.plan=await aiPlan(s);save();go("map")},"map");
+  });
+}
+function map(){
+  const s=S();if(!s?.cs.length)return nodata();
+  const dp={},D=(c,seen=[])=>dp[c.id]??(dp[c.id]=seen.includes(c.id)?0:1+Math.max(-1,...c.pre.map(i=>{const p=cc(s,i);return p?D(p,[...seen,c.id]):-1}))),
+  L=[],pos={};
+  s.cs.forEach(c=>(L[D(c)]??=[]).push(c));
+  L.forEach((l,x)=>l.forEach((c,y)=>pos[c.id]=[x*200+6,y*60+6]));
+  const W=L.length*200,H=Math.max(...L.filter(Boolean).map(l=>l.length))*60+6;
+  const edges=s.cs.flatMap(c=>c.pre.filter(i=>pos[i]).map(i=>{const[a,b]=pos[i],[x,y]=pos[c.id];
+    return `<path d="M${a+170} ${b+19}C${a+185} ${b+19} ${x-15} ${y+19} ${x} ${y+19}" style="fill:none;stroke:var(--mut)" opacity=".6"/>`})).join("");
+  const nodes=s.cs.map(c=>{const[x,y]=pos[c.id],p=s.m[c.id].p;
+    return `<g data-id="${esc(c.id)}" style="cursor:pointer"><rect x="${x}" y="${y}" width="170" height="38" rx="8" style="fill:var(--card);stroke:${col(p)};stroke-width:3"/>
+    <text x="${x+8}" y="${y+16}" font-size="12" style="fill:var(--tx)">${esc(c.name.slice(0,25))}</text>
+    <text x="${x+8}" y="${y+31}" font-size="11" style="fill:${col(p)}">${pc(p)} mastery</text></g>`}).join("");
+  $("#app").innerHTML=`<div class="card"><h2>Concept graph: ${esc(s.subject)}</h2>
+  <p class="mut">Arrows point from prerequisite to dependent topic. Red is weak, amber is developing, green is strong. Select a topic to study it.</p>
+  <div class="w"><svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${edges}${nodes}</svg></div></div>`;
+}
+function plan(){
+  const s=S();if(!s?.plan)return nodata();
+  const t=Math.floor((Date.now()-s.start)/day);
+  $("#app").innerHTML=`<div class="card"><h2>Your study plan</h2>${s.note?`<p>${esc(s.note)}</p>`:""}<p class="mut">${s.plan.length} days to the exam. After a few quizzes, re-plan and Gemini will adjust to your latest scores.</p><p><button class="p" id="rp">Re-plan with AI</button></p>`+
+  s.plan.map((d,i)=>`<div class="day ${i==t?"now":""}"><b>Day ${d.d}${i==t?" (today)":""}</b>${d.min?` <span class="mut">${d.min} min</span>`:""}${d.task||d.rev?`<div>${esc(d.task||"Revision and mixed quiz on your weakest topics")}</div>`:""}`+
+    d.items.map(id=>`<button class="tag" data-id="${esc(id)}" style="border-color:${col(s.m[id].p)}">${esc(cc(s,id).name)}</button>`).join("")+`</div>`).join("")+`</div>`;
+  $("#rp").onclick=()=>task("Gemini is re-planning around your latest scores",async()=>{s.plan=await aiPlan(s);s.start=Date.now();save();go("plan")},"plan");
+}
+function studyV(){
+  const s=S();if(!s?.cs.length)return nodata();
+  const c=cc(s,cur)||[...s.cs].sort((a,b)=>need(s,b)-need(s,a))[0];cur=c.id;
+  const m=s.m[c.id],pk=s.cache[c.id];
+  $("#app").innerHTML=`<div class="card"><h2>${esc(c.name)}</h2>
+  <p>Mastery ${pc(m.p)}, difficulty ${c.diff} of 3, ${m.n} attempts</p>${bar(m.p)}
+  <p><select id="pick">${s.cs.map(x=>`<option value="${esc(x.id)}" ${x.id==cur?"selected":""}>${esc(x.name)}</option>`).join("")}</select></p>
+  <p><button class="p" id="gen">${pk?"Regenerate":"Generate"} notes, concept map and quiz</button> <button id="wk">Pick my weakest topic</button></p></div><div id="pack"></div>`;
+  $("#pick").onchange=e=>{cur=e.target.value;studyV()};
+  $("#wk").onclick=()=>{cur=[...s.cs].sort((a,b)=>need(s,b)-need(s,a))[0].id;studyV()};
+  $("#gen").onclick=()=>task("Gemini is writing your study pack",async()=>{
+    const j=await gem(`A student is preparing for an exam in "${s.subject}" and is weak at "${c.name}". Return JSON {"notes":"clear revision notes of 150 to 220 words, paragraphs separated by newlines","points":["5 key formulas or facts"],"map":[{"t":"branch name","k":["sub-points"]}],"quiz":[{"q":"","o":["4 options"],"a":0,"e":"why"}]}. The quiz has 5 questions of rising difficulty; a is the zero-based index of the correct option.`);
+    s.cache[c.id]={notes:String(j.notes||""),points:(j.points||[]).map(String),map:(j.map||[]).map(b=>({t:String(b.t),k:(b.k||[]).map(String)})),quiz:clean(j.quiz)};
+    save();studyV();
+  },"study");
+  if(pk){
+    $("#pack").innerHTML=`<div class="card"><h3>Notes</h3>${pk.notes.split("\n").filter(Boolean).map(x=>`<p>${esc(x)}</p>`).join("")}
+    <ul>${pk.points.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>
+    <div class="card"><h3>Concept map</h3><b>${esc(c.name)}</b><ul class="tree">${pk.map.map(b=>`<li><b>${esc(b.t)}</b><ul class="tree">${b.k.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></li>`).join("")}</ul></div>
+    <div class="card"><h3>Quiz</h3><div id="qz"></div></div>`;
+    if(pk.quiz.length)runQuiz($("#qz"),pk.quiz,(q,g)=>upd(c.id,g),(n,t)=>{
+      $("#qz").innerHTML=`<p>You scored ${n} of ${t}. Mastery is now ${pc(s.m[c.id].p)}.</p><button class="p" id="again">Continue with next weakest topic</button>`;
+      $("#again").onclick=()=>{cur=[...s.cs].sort((a,b)=>need(s,b)-need(s,a))[0].id;studyV()}});
+  }
+}
+function prog(){
+  const s=S();if(!s?.cs.length)return nodata();
+  const lv=[1,2,3].map(d=>{const l=s.log.filter(x=>x.d==d);return{d,n:l.length,a:avg(l.map(x=>x.ok))}}),
+  pts=[];for(let i=5;i<=s.log.length;i+=5)pts.push(avg(s.log.slice(i-5,i).map(x=>x.ok)));
+  const line=pts.length>1?`<svg viewBox="0 0 300 80" width="100%"><polyline style="fill:none;stroke:var(--pri);stroke-width:3" points="${pts.map((v,i)=>`${i*300/(pts.length-1)},${75-v*70}`).join(" ")}"/></svg>`:`<p class="mut">Answer 10 or more practice questions to see your trend.</p>`;
+  const lb=Object.entries(DB.st).filter(([,x])=>x.k===s.k&&x.cs.length).sort((a,b)=>b[1].xp-a[1].xp),b=behind(s);
+  $("#app").innerHTML=`<div class="card"><h2>Your progress</h2><p>${s.xp} points, average mastery ${pc(avg(s.cs.map(c=>s.m[c.id].p)))}, ${s.log.length} questions answered.
+  ${b?`<b style="color:var(--bad)">${b} topic${b>1?"s are":" is"} behind schedule.</b>`:"You are on schedule."}</p></div>
+  <div class="g"><div class="card"><h3>Accuracy by difficulty level</h3>${lv.map(l=>`<p class="mut">Level ${l.d} (${l.n} answered)</p>${bar(l.a)}`).join("")}</div>
+  <div class="card"><h3>Accuracy trend (per 5 answers)</h3>${line}</div></div>
+  <div class="card"><h3>Mastery by topic</h3><div class="w"><table>${[...s.cs].sort((a,b)=>s.m[a.id].p-s.m[b.id].p).map(c=>`<tr><td>${esc(c.name)}</td><td style="width:35%">${bar(s.m[c.id].p)}</td><td>${pc(s.m[c.id].p)}</td><td class="mut">${s.m[c.id].n} attempts</td></tr>`).join("")}</table></div></div>
+  <div class="card"><h3>Leaderboard</h3><div class="w"><table><tr><th>Rank</th><th>Student</th><th>Points</th><th>Mastery</th><th>Answered</th><th>Behind</th></tr>
+  ${lb.map(([n,x],i)=>`<tr class="${n==DB.me?"me":""}"><td>${i+1}</td><td>${esc(n)}</td><td>${x.xp}</td><td>${pc(avg(x.cs.map(c=>x.m[c.id].p)))}</td><td>${x.log.length}</td><td>${behind(x)}</td></tr>`).join("")}</table></div></div>`;
+}
+function teach(){
+  const ks=Object.keys(DB.sub);if(!ks.length)return nodata();
+  const k=DB.sub[tk]?tk:ks[0];tk=k;
+  const st=Object.entries(DB.st).filter(([,s])=>s.k===k&&s.cs.length),cs=DB.sub[k].cs,
+  rows=cs.map(c=>{const v=st.map(([,s])=>s.m[c.id]?.p??0);return{c,a:avg(v),low:v.filter(p=>p<.5).length}}).sort((x,y)=>x.a-y.a);
+  $("#app").innerHTML=`<div class="card"><h2>Teacher dashboard</h2>
+  <select id="ts">${ks.map(x=>`<option value="${esc(x)}" ${x==k?"selected":""}>${esc(x)}</option>`).join("")}</select>
+  <p class="mut">${st.length} student${st.length==1?"":"s"} on this device. Topics are sorted weakest first, so start teaching from the top.</p>
+  <div class="w"><table><tr><th>Topic</th><th>Class mastery</th><th>Students below 50%</th><th></th></tr>
+  ${rows.map(r=>`<tr><td>${esc(r.c.name)}</td><td style="width:30%">${bar(r.a)}${pc(r.a)}</td><td>${r.low} of ${st.length}</td><td><button data-t="${esc(r.c.id)}">Teaching tip</button></td></tr>`).join("")}</table></div>
+  <div id="tip"></div></div>
+  <div class="card"><h3>Students</h3><div class="w"><table><tr><th>Name</th><th>Mastery</th><th>Weakest topic</th><th>Answered</th><th>Behind</th></tr>
+  ${st.map(([n,s])=>{const w=[...s.cs].sort((a,b)=>s.m[a.id].p-s.m[b.id].p)[0];return `<tr><td>${esc(n)}</td><td>${pc(avg(s.cs.map(c=>s.m[c.id].p)))}</td><td>${esc(w.name)}</td><td>${s.log.length}</td><td>${behind(s)}</td></tr>`}).join("")}</table></div></div>`;
+  $("#ts").onchange=e=>{tk=e.target.value;teach()};
+  document.querySelectorAll("[data-t]").forEach(b=>b.onclick=()=>{
+    const r=rows.find(x=>x.c.id==b.dataset.t);
+    task("Gemini is preparing a teaching tip",async()=>{
+      const j=await gem(`A class preparing for "${k}" has average mastery of ${pc(r.a)} on "${r.c.name}". Return JSON {"misconceptions":["3 likely misconceptions"],"lesson":["4 steps of a 15 minute re-teaching lesson"]}.`);
+      teach();$("#tip").innerHTML=`<h3>${esc(r.c.name)}</h3><b>Likely misconceptions</b><ul>${(j.misconceptions||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ul><b>15 minute lesson</b><ol>${(j.lesson||[]).map(x=>`<li>${esc(x)}</li>`).join("")}</ol>`;
+    },"teacher");
+  });
+}
+
+/* ---------- shell ---------- */
+const V={home,diag,map,plan,study:studyV,progress:prog,teacher:teach};
+function cd(){
+  const s=S();let t="";
+  if(s?.date){const ms=new Date(s.date+"T23:59:59")-Date.now();
+    t=ms>0?`${Math.floor(ms/day)} days ${Math.floor(ms%day/36e5)} hours to exam`:"Exam date has passed"}
+  $("#cd").textContent=t;
+}
+function go(v){view=v;
+  document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.v==v));
+  cd();V[v]();
+  document.querySelectorAll("#app [data-id]").forEach(b=>b.onclick=()=>{cur=b.dataset.id;go("study")});
+}
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{$("#err").textContent="";go(b.dataset.v)});
+setInterval(cd,6e4);go("home");
+</script>
+</body>
+</html>
